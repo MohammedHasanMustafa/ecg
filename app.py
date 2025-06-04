@@ -23,12 +23,12 @@ st.set_page_config(
 def load_ecg_model():
     try:
         model = load_model("cnn_lstm_model.h5")
-        # Verify model architecture and weights
-        if not hasattr(model, 'predict'):
-            raise ValueError("Loaded object is not a valid Keras model")
+        # Verify model can make predictions
+        test_input = np.random.rand(1, 187, 1)
+        _ = model.predict(test_input, verbose=0)
         return model
     except Exception as e:
-        st.error(f"Failed to load model. Please check the file.\nError: {e}")
+        st.error(f"Model loading failed: {str(e)}")
         st.stop()
 
 model = load_ecg_model()
