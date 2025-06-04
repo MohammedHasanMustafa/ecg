@@ -1,7 +1,9 @@
 import numpy as np
 import uuid
+import tempfile
 import streamlit as st
 import pandas as pd
+from PIL import Image
 from fpdf import FPDF
 import matplotlib.pyplot as plt
 from tensorflow.keras.models import load_model
@@ -305,11 +307,9 @@ def generate_pdf_report(report, output_path):
 # 10) Streamlit UI
 def main():
     st.title("❤️‍🩹 Advanced ECG Analysis System")
-    st.markdown("Upload an ECG image for high-accuracy analysis")
+    st.markdown("Upload an ECG image for analysis")
 
-    uploaded_file = st.file_uploader(
-        "Choose ECG Image", type=["png", "jpg", "jpeg"]
-    )
+    uploaded_file = st.file_uploader("Choose ECG Image", type=["png", "jpg", "jpeg"])
     if not uploaded_file:
         return
 
