@@ -1,3 +1,4 @@
+import io
 import numpy as np
 import uuid
 import tempfile
@@ -162,7 +163,7 @@ def process_ecg_image(image_path):
         mi_type = infer_mi_type(st_analysis)
 
         # Set ST segment and QT intervals based on diagnosis
-        if label == "Myocardial Infarction" or label == "ST Elevation":
+        if label in ["Myocardial Infarction", "ST Elevation"]:
             st_seg = "Elevation"
             qt_interval = np.random.randint(360, 450)
         elif label == "ST Depression":
@@ -313,12 +314,14 @@ def main():
     if not uploaded_file:
         return
 
-    with Image.open(uploaded_file) as img:
-        st.subheader("Uploaded ECG Image")
-        st.image(img, use_column_width=True)
+    # Read bytes once and use for both display and saving
+    file_bytes = uploaded_file.read()
+    img = Image.open(io.BytesIO(file_bytes))
+    st.subheader("Uploaded ECG Image")
+    st.image(img, use_container_width=True)
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_file:
-        tmp_file.write(uploaded_file.read())
+        tmp_file.write(file_bytes)
         tmp_path = tmp_file.name
 
     with st.spinner("Analyzing ECG..."):
