@@ -18,7 +18,7 @@ st.set_page_config(
 )
 # ──────────────────────────────────────────────────────────────────────────────
 
-# 1) Load your trained high-accuracy model
+# 1) Load your trained sigmoid-output model
 @st.cache_resource
 def load_ecg_model():
     try:
@@ -57,15 +57,13 @@ _LEAD_ANALYSIS = {
     "V6":  {"amplitude": "0.5-2.5 mV", "duration": "<= 120 ms"}
 }
 
-# 4) Simplified ECG image preprocessing
+# 4) Simplified ECG image preprocessing (always resample to 187 points)
 def preprocess_ecg_image(image_path):
     try:
         img = Image.open(image_path).convert("L")
         img = img.resize((512, 512), Image.LANCZOS)
         img_arr = np.array(img) / 255.0
         ecg_signal = img_arr.mean(axis=1).squeeze()
-
-        # Always interpolate/resample to exactly 187 points
         ecg_signal = np.interp(
             np.linspace(0, 1, 187),
             np.linspace(0, 1, len(ecg_signal)),
@@ -128,14 +126,17 @@ def validate_parameters(report):
 
     return warnings
 
-# 8) Main processing (no confidence threshold)
+# 8) Main processing (sigmoid outputs)
 def process_ecg_image(image_path):
     try:
         processed_data = preprocess_ecg_image(image_path)
-        raw_pred = model.predict(processed_data, verbose=0)[0]
-        label_index = np.argmax(raw_pred)
-        confidence = raw_pred[label_index]
+        raw_preds = model.predict(processed_data, verbose=0)[0]  # e.g. [0.02, 0.01, 0.97, 0.01, 0.03]
+
+        # Each output is a sigmoid probability ∈ [0,1]; convert to %:
+        confidences = raw_preds * 100.0  # e.g. [2.0, 1.0, 97.0, 1.0, 3.0]
+        label_index = np.argmax(raw_preds)
         label = _CLASS_LABELS.get(label_index, "Unknown")
+        top_confidence = confidences[label_index]
 
         # Generate physiological parameters
         heart_rate = np.random.randint(60, 100)
@@ -167,7 +168,8 @@ def process_ecg_image(image_path):
             "ST Segment": st_seg,
             "Diagnosis": label,
             "MI Type": mi_type,
-            "Confidence": float(confidence) * 100,  # as percentage
+            "Confidence": float(top_confidence),     # top sigmoid * 100
+            "All Confidences": confidences.tolist(),  # list of five percentages
             "Validation Warnings": [],
             "Affected Leads": st_analysis["leads_affected"],
             "Lead II Detail": {
@@ -268,7 +270,7 @@ def generate_pdf_report(report, output_path):
     pdf.cell(30, 8, "QT (ms)", border=1, align="C", ln=True)
 
     pdf.set_font("Arial", size=12)
-    qt_ms = int(lii["QT_interval"].split()[0])
+    qt_ms = int(report["Lead II Detail"]["QT_interval"].split()[0])
     affected_set = set(report["Affected Leads"])
     for lead, specs in _LEAD_ANALYSIS.items():
         pdf.cell(20, 8, lead, border=1)
@@ -285,6 +287,22 @@ def generate_pdf_report(report, output_path):
         pdf.set_font("Arial", size=10)
         for w in report["Validation Warnings"]:
             pdf.cell(0, 6, f"- {w}", ln=True)
+
+    # IV. Sigmoid-based confidences for all classes
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 8, "IV. Class-wise Confidence Scores", ln=True)
+    pdf.ln(4)
+
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(60, 8, "Class", border=1, align="C")
+    pdf.cell(0, 8, "Confidence (%)", border=1, align="C", ln=True)
+
+    pdf.set_font("Arial", size=12)
+    all_confs = report["All Confidences"]
+    for idx, class_name in _CLASS_LABELS.items():
+        pdf.cell(60, 8, class_name, border=1)
+        pdf.cell(0, 8, f"{all_confs[idx]:.1f}%", border=1, ln=True)
 
     pdf.output(output_path)
 
@@ -380,23 +398,24 @@ def main():
         for note in report["Validation Warnings"]:
             st.write(f"- {note}")
 
-    # V. Diagnosis Probabilities Bar Chart
-    st.subheader("Diagnosis Probabilities")
-    preds = model.predict(preprocess_ecg_image(tmp_path))[0]
+    # V. Sigmoid-based Confidence Bar Chart (all classes)
+    st.subheader("V. Class-wise Confidence Scores (0–100%)")
+    all_confidences = report["All Confidences"]
     fig, ax = plt.subplots()
     bar_colors = [
-        "green" if _CLASS_LABELS[idx] == report["Diagnosis"] else "blue"
+        "green" if idx == np.argmax(report["All Confidences"]) else "blue"
         for idx in range(len(_CLASS_LABELS))
     ]
-    bars = ax.bar(list(_CLASS_LABELS.values()), preds * 100, color=bar_colors)
-    ax.set_ylabel("Probability (%)")
+    bars = ax.bar(list(_CLASS_LABELS.values()), all_confidences, color=bar_colors)
+    ax.set_ylabel("Confidence (%)")
     ax.set_ylim(0, 100)
     ax.set_xticklabels(list(_CLASS_LABELS.values()), rotation=45, ha="right")
+
     for bar in bars:
         height = bar.get_height()
         ax.text(
             bar.get_x() + bar.get_width() / 2.0,
-            height,
+            height + 1,
             f"{height:.1f}%",
             ha="center",
             va="bottom",
