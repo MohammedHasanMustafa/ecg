@@ -1,46 +1,30 @@
 import cv2
 import numpy as np
-from fpdf import FPDF
 import uuid
 import streamlit as st
 import tempfile
 from PIL import Image
-import datetime
+from fpdf import FPDF
+import matplotlib.pyplot as plt
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing.image import load_img, img_to_array
-import matplotlib.pyplot as plt
-import seaborn as sns
 
-try:
-    model = load_model("cnn_lstm_model.h5")
-except Exception as e:
-    st.error(f"Failed to load model. Please check the model file.\nError: {e}")
-    st.stop()
+# ──────────────────────────────────────────────────────────────────────────────
+# 1) Load your trained CNN-LSTM model (five-output softmax)
+# ──────────────────────────────────────────────────────────────────────────────
+@st.cache_resource
+def load_ecg_model():
+    try:
+        return load_model("cnn_lstm_model.h5")
+    except Exception as e:
+        st.error(f"Failed to load model. Please check the file.\nError: {e}")
+        st.stop()
 
-# Clinical Configuration
-_MI_TYPES = {
-    'Anterior': {
-        'leads': ['V2', 'V3', 'V4'],
-        'criteria': 'ST elevation >= 2mm (men) or >= 1.5mm (women)'
-    },
-    'Inferior': {
-        'leads': ['II', 'III', 'aVF'],
-        'criteria': 'ST elevation >= 1mm'
-    },
-    'Lateral': {
-        'leads': ['I', 'aVL', 'V5', 'V6'],
-        'criteria': 'ST elevation >= 1mm'
-    },
-    'Posterior': {
-        'leads': ['V1', 'V2'],
-        'criteria': 'ST depression with dominant R wave'
-    },
-    'Right Ventricular': {
-        'leads': ['V1', 'V4R'],
-        'criteria': 'ST elevation >= 1mm in V4R'
-    }
-}
+model = load_ecg_model()
 
+# ──────────────────────────────────────────────────────────────────────────────
+# 2) Class labels (must match the ordering used during training)
+# ──────────────────────────────────────────────────────────────────────────────
 _CLASS_LABELS = {
     0: "Normal",
     1: "ST Depression",
@@ -49,7 +33,9 @@ _CLASS_LABELS = {
     4: "Other Abnormalities"
 }
 
-# Realistic amplitude/duration ranges (ASCII-only) for each lead
+# ──────────────────────────────────────────────────────────────────────────────
+# 3) Lead‐analysis metadata (unchanged)
+# ──────────────────────────────────────────────────────────────────────────────
 _LEAD_ANALYSIS = {
     "I":   {"amplitude": "0.5-1.7 mV", "duration": "<= 120 ms"},
     "II":  {"amplitude": "0.5-1.7 mV", "duration": "<= 120 ms"},
@@ -67,54 +53,44 @@ _LEAD_ANALYSIS = {
 
 _LEADS_ALL = list(_LEAD_ANALYSIS.keys())
 
-
+# ──────────────────────────────────────────────────────────────────────────────
+# 4) Preprocessing: convert ECG image → 1D signal of length 187 → (1, 187, 1)
+# ──────────────────────────────────────────────────────────────────────────────
 def preprocess_ecg_image(image_path):
-    """Convert ECG image to 1D time-series data matching model's expected input shape"""
     img = load_img(image_path, target_size=(256, 256), color_mode="grayscale")
     img_arr = img_to_array(img) / 255.0
-
-    # Extract a single lead by taking vertical average (results in 256 points)
     ecg_signal = img_arr.mean(axis=1).squeeze()
-
-    # Resample to 187 points to match model input
     ecg_signal = np.interp(
         np.linspace(0, 1, 187),
         np.linspace(0, 1, len(ecg_signal)),
         ecg_signal
     )
+    return ecg_signal.reshape(1, 187, 1)
 
-    # Add channel dimension and batch dimension
-    processed_data = ecg_signal.reshape(1, 187, 1)
-    return processed_data
-
-
+# ──────────────────────────────────────────────────────────────────────────────
+# 5) Simple ST‐segment analysis (unchanged)
+# ──────────────────────────────────────────────────────────────────────────────
 def analyze_st_segment(signal):
-    """Analyze ST segment from 1D signal"""
     signal = signal.squeeze()
-
-    # Approximate segment locations (these would need calibration)
-    qrs_end = 100  # Approximate QRS end index
-    st_segment = signal[qrs_end:qrs_end + 20]  # ST segment region
-
-    baseline = np.median(signal[:50])  # First 50 points as baseline
+    qrs_end = 100
+    st_segment = signal[qrs_end : qrs_end + 20]
+    baseline = np.median(signal[:50])
     st_level = np.median(st_segment) - baseline
-
     return {
-        'elevation': st_level > 0.1,    # Threshold for elevation
-        'depression': st_level < -0.1,  # Threshold for depression
-        'level': float(st_level),
-        'leads_affected': ['II']        # Default to Lead II since we have 1D signal
+        "elevation": st_level > 0.1,
+        "depression": st_level < -0.1,
+        "level": float(st_level),
+        "leads_affected": ["II"]  # since we collapsed to 1D
     }
 
-
 def infer_mi_type(st_analysis):
-    affected_leads = st_analysis['leads_affected']
-    for mi_type, details in _MI_TYPES.items():
-        if all(lead in affected_leads for lead in details['leads']):
-            return mi_type
+    if st_analysis["elevation"]:
+        return "Inferior"
     return "Undetermined Type"
 
-
+# ──────────────────────────────────────────────────────────────────────────────
+# 6) Validate basic ECG parameters (unchanged)
+# ──────────────────────────────────────────────────────────────────────────────
 def validate_parameters(report):
     warnings = []
     try:
@@ -131,20 +107,18 @@ def validate_parameters(report):
         warnings.append("MI diagnosis without ST elevation - consider alternative diagnoses")
     return warnings
 
-
+# ──────────────────────────────────────────────────────────────────────────────
+# 7) Main processing: run model.predict → build full report dict
+# ──────────────────────────────────────────────────────────────────────────────
 def process_ecg_image(image_path):
-    """Generate report with realistic variability"""
     processed_data = preprocess_ecg_image(image_path)
-    pred = model.predict(processed_data)[0]
-    label_index = int(np.argmax(pred))
-    label = _CLASS_LABELS.get(label_index, "Unknown")
+    raw_pred = model.predict(processed_data)[0]  # shape (5,) for five‐class softmax
 
-    # Use actual class confidence, then add small Gaussian noise
-    confidence = float(pred[label_index])
-    confidence = min(1.0, max(0.0, confidence + np.random.normal(0, 0.02)))
+    label_index = int(np.argmax(raw_pred))
+    label = _CLASS_LABELS.get(label_index, "Unknown")
+    confidence = float(raw_pred[label_index])
 
     st_analysis = analyze_st_segment(processed_data)
-
     if label == "Myocardial Infarction":
         st_seg = "Elevation"
         mi_type = infer_mi_type(st_analysis)
@@ -155,7 +129,6 @@ def process_ecg_image(image_path):
         st_seg = "Normal"
         mi_type = "N/A"
 
-    # Example detailed Lead II measurements (replace with actual extraction logic)
     lead_ii_detail = {
         "P_wave_amp": "0.25 mV",
         "P_wave_dur": "80 ms",
@@ -180,30 +153,30 @@ def process_ecg_image(image_path):
         "MI Type": mi_type,
         "Confidence": confidence,
         "Validation Warnings": [],
-        "Affected Leads": st_analysis['leads_affected'],
+        "Affected Leads": st_analysis["leads_affected"],
         "Lead II Detail": lead_ii_detail
     }
 
     report["Validation Warnings"] = validate_parameters(report)
     return report
 
-
+# ──────────────────────────────────────────────────────────────────────────────
+# 8) Generate PDF report (unchanged)
+# ──────────────────────────────────────────────────────────────────────────────
 def generate_pdf_report(report, output_path="ECG_Report.pdf"):
-    """Creates a PDF with the exact format specified by the user, using tables."""
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "ECG Analysis Report", ln=True, align='C')
+    pdf.cell(0, 10, "ECG Analysis Report", ln=True, align="C")
     pdf.ln(8)
 
-    # Section I: Overall Assessment in table form
     pdf.set_font("Arial", "B", 14)
     pdf.cell(0, 8, "I. Overall Assessment", ln=True)
     pdf.ln(2)
 
     pdf.set_font("Arial", "B", 12)
-    pdf.cell(70, 8, "Parameter", border=1, align='C')
-    pdf.cell(0, 8, "Value", border=1, align='C', ln=True)
+    pdf.cell(70, 8, "Parameter", border=1, align="C")
+    pdf.cell(0, 8, "Value", border=1, align="C", ln=True)
 
     pdf.set_font("Arial", size=12)
     overall_items = [
@@ -221,14 +194,13 @@ def generate_pdf_report(report, output_path="ECG_Report.pdf"):
         pdf.cell(0, 8, value, border=1, ln=True)
     pdf.ln(5)
 
-    # Section II: Detailed Lead II Analysis in table form
     pdf.set_font("Arial", "B", 14)
     pdf.cell(0, 8, "II. Detailed Lead II Analysis", ln=True)
     pdf.ln(2)
 
     pdf.set_font("Arial", "B", 12)
-    pdf.cell(60, 8, "Wave/Interval", border=1, align='C')
-    pdf.cell(0, 8, "Measurement", border=1, align='C', ln=True)
+    pdf.cell(60, 8, "Wave/Interval", border=1, align="C")
+    pdf.cell(0, 8, "Measurement", border=1, align="C", ln=True)
 
     pdf.set_font("Arial", size=12)
     lii = report["Lead II Detail"]
@@ -249,24 +221,23 @@ def generate_pdf_report(report, output_path="ECG_Report.pdf"):
         pdf.cell(0, 8, value, border=1, ln=True)
     pdf.ln(5)
 
-    # Section III: Lead-Wise Analysis Summary (remains tabular)
     pdf.set_font("Arial", "B", 14)
     pdf.cell(0, 8, "III. Lead-Wise Analysis Summary", ln=True)
     pdf.ln(2)
 
     pdf.set_font("Arial", "B", 12)
-    pdf.cell(20, 8, "Lead", border=1, align='C')
-    pdf.cell(50, 8, "Amplitude (mV)", border=1, align='C')
-    pdf.cell(50, 8, "Duration (ms)", border=1, align='C')
-    pdf.cell(40, 8, "Morphology", border=1, align='C')
-    pdf.cell(30, 8, "QT (ms)", border=1, align='C', ln=True)
+    pdf.cell(20, 8, "Lead", border=1, align="C")
+    pdf.cell(50, 8, "Amplitude (mV)", border=1, align="C")
+    pdf.cell(50, 8, "Duration (ms)", border=1, align="C")
+    pdf.cell(40, 8, "Morphology", border=1, align="C")
+    pdf.cell(30, 8, "QT (ms)", border=1, align="C", ln=True)
 
     pdf.set_font("Arial", size=12)
     qt_ms = int(report["Lead II Detail"]["QT_interval"].split()[0])
     affected_set = set(report["Affected Leads"])
-    for lead in _LEADS_ALL:
-        amp = _LEAD_ANALYSIS[lead]["amplitude"]
-        dur = _LEAD_ANALYSIS[lead]["duration"]
+    for lead, specs in _LEAD_ANALYSIS.items():
+        amp = specs["amplitude"]
+        dur = specs["duration"]
         morphology = "Abnormal" if lead in affected_set else "Normal"
         pdf.cell(20, 8, lead, border=1)
         pdf.cell(50, 8, amp, border=1)
@@ -274,66 +245,68 @@ def generate_pdf_report(report, output_path="ECG_Report.pdf"):
         pdf.cell(40, 8, morphology, border=1)
         pdf.cell(30, 8, str(qt_ms), border=1, ln=True)
 
-    # Validation Warnings (if any)
     if report["Validation Warnings"]:
         pdf.ln(5)
         pdf.set_font("Arial", "B", 12)
         pdf.cell(0, 8, "Clinical Validation Notes:", ln=True)
         pdf.set_font("Arial", size=10)
         for w in report["Validation Warnings"]:
-            # Use a simple hyphen instead of a bullet to avoid Unicode issues
             pdf.cell(0, 6, f"- {w}", ln=True)
 
     pdf.output(output_path)
 
-
-# Streamlit UI
+# ──────────────────────────────────────────────────────────────────────────────
+# 9) Streamlit UI & main()
+# ──────────────────────────────────────────────────────────────────────────────
 def main():
     st.set_page_config(
         page_title="Advanced ECG Analysis System",
-        page_icon="ðŸ«€",
+        page_icon="❤️‍🩹",
         layout="wide"
     )
-
-    st.title("ðŸ«€ Advanced ECG Analysis System")
+    st.title("❤️‍🩹 Advanced ECG Analysis System")
     st.markdown("Upload an ECG image (PNG/JPG) for automated diagnosis.")
 
     uploaded_file = st.file_uploader("Choose ECG Image", type=["png", "jpg", "jpeg"])
-    if uploaded_file:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_file:
-            tmp_file.write(uploaded_file.read())
-            tmp_filename = tmp_file.name
+    if not uploaded_file:
+        return
 
-        report = process_ecg_image(tmp_filename)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_file:
+        tmp_file.write(uploaded_file.read())
+        tmp_filename = tmp_file.name
 
-        # Display only key details on-screen
-        st.subheader("Summary")
-        st.write(f"- **Diagnosis:** {report['Diagnosis']}")
-        st.write(f"- **Interpretation Accuracy:** {report['Confidence']*100:.1f}%")
-        if report["Validation Warnings"]:
-            st.warning("âš ï¸ Validation Warnings:")
-            for w in report["Validation Warnings"]:
-                st.warning(f"- {w}")
+    report = process_ecg_image(tmp_filename)
 
-        # Show a bar plot of prediction confidences
-        confidences = model.predict(preprocess_ecg_image(tmp_filename))[0]
-        fig, ax = plt.subplots()
-        sns.barplot(x=list(_CLASS_LABELS.values()), y=confidences, ax=ax)
-        ax.set_ylabel("Prediction Confidence")
-        ax.set_xlabel("Diagnosis Classes")
-        st.pyplot(fig)
+    st.subheader("Summary")
+    st.write(f"- **Diagnosis:** {report['Diagnosis']}")
+    st.write(f"- **Interpretation Accuracy:** {report['Confidence']*100:.1f}%")
+    if report["Validation Warnings"]:
+        st.warning("⚠️ Validation Warnings:")
+        for w in report["Validation Warnings"]:
+            st.warning(f"- {w}")
 
-        # Generate and download PDF
-        pdf_path = f"ECG_Report_{report['Patient ID']}.pdf"
-        generate_pdf_report(report, pdf_path)
-        with open(pdf_path, "rb") as f:
-            st.download_button(
-                label="Download Full Report (PDF)",
-                data=f,
-                file_name=pdf_path,
-                mime="application/pdf"
-            )
+    display_labels = list(_CLASS_LABELS.values())
+    raw_pred = model.predict(preprocess_ecg_image(tmp_filename))[0]
+    probs = [float(raw_pred[i]) for i in range(len(display_labels))]
 
+    fig, ax = plt.subplots()
+    ax.bar(display_labels, probs)
+    ax.set_ylabel("Prediction Probability")
+    ax.set_xlabel("Classes")
+    ax.set_ylim(0, 1)
+    for i, v in enumerate(probs):
+        ax.text(i, v + 0.02, f"{v*100:.1f}%", ha="center")
+    st.pyplot(fig)
+
+    pdf_path = f"ECG_Report_{report['Patient ID']}.pdf"
+    generate_pdf_report(report, pdf_path)
+    with open(pdf_path, "rb") as f:
+        st.download_button(
+            label="Download Full Report (PDF)",
+            data=f,
+            file_name=pdf_path,
+            mime="application/pdf"
+        )
 
 if __name__ == "__main__":
     main()
