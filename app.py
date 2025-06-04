@@ -57,7 +57,7 @@ _LEAD_ANALYSIS = {
     "V6":  {"amplitude": "0.5-2.5 mV", "duration": "<= 120 ms"}
 }
 
-# 4) Enhanced ECG image preprocessing
+# 4) Simplified ECG image preprocessing
 def preprocess_ecg_image(image_path):
     try:
         img = Image.open(image_path).convert("L")
@@ -65,29 +65,12 @@ def preprocess_ecg_image(image_path):
         img_arr = np.array(img) / 255.0
         ecg_signal = img_arr.mean(axis=1).squeeze()
 
-        if len(ecg_signal) < 187:
-            ecg_signal = np.interp(
-                np.linspace(0, 1, 187),
-                np.linspace(0, 1, len(ecg_signal)),
-                ecg_signal
-            )
-        else:
-            peaks = np.where(ecg_signal > 0.7)[0]
-            if len(peaks) > 0:
-                keep_indices = np.sort(
-                    np.concatenate([
-                        peaks,
-                        np.linspace(0, len(ecg_signal) - 1, 187 - len(peaks), dtype=int)
-                    ])
-                )
-                ecg_signal = ecg_signal[keep_indices]
-            else:
-                ecg_signal = np.interp(
-                    np.linspace(0, 1, 187),
-                    np.linspace(0, 1, len(ecg_signal)),
-                    ecg_signal
-                )
-
+        # Always interpolate/resample to exactly 187 points
+        ecg_signal = np.interp(
+            np.linspace(0, 1, 187),
+            np.linspace(0, 1, len(ecg_signal)),
+            ecg_signal
+        )
         return ecg_signal.reshape(1, 187, 1)
     except Exception as e:
         st.error(f"Image processing failed: {str(e)}")
@@ -314,9 +297,14 @@ def main():
     if not uploaded_file:
         return
 
-    # Read bytes once and use for both display and saving
+    # Read bytes once for display and saving
     file_bytes = uploaded_file.read()
-    img = Image.open(io.BytesIO(file_bytes))
+    try:
+        img = Image.open(io.BytesIO(file_bytes))
+    except Exception:
+        st.error("Image processing failed: cannot identify image file")
+        return
+
     st.subheader("Uploaded ECG Image")
     st.image(img, use_container_width=True)
 
