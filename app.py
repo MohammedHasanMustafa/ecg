@@ -18,7 +18,7 @@ st.set_page_config(
 )
 # ──────────────────────────────────────────────────────────────────────────────
 
-# 1) Load your trained sigmoid-output model
+# 1) Load your trained softmax-output model
 @st.cache_resource
 def load_ecg_model():
     try:
@@ -57,21 +57,28 @@ _LEAD_ANALYSIS = {
     "V6":  {"amplitude": "0.5-2.5 mV", "duration": "<= 120 ms"}
 }
 
-# 4) Simplified ECG image preprocessing (always resample to 187 points)
+# 4) Improved ECG image preprocessing
 def preprocess_ecg_image(image_path):
     try:
+        # Open and convert to grayscale
         img = Image.open(image_path).convert("L")
-        img = img.resize((512, 512), Image.LANCZOS)
-        img_arr = np.array(img) / 255.0
-        ecg_signal = img_arr.mean(axis=1).squeeze()
-        ecg_signal = np.interp(
-            np.linspace(0, 1, 187),
-            np.linspace(0, 1, len(ecg_signal)),
-            ecg_signal
-        )
+        # Resize to 187×187 so we can take the center column as 187 samples
+        img = img.resize((187, 187), Image.LANCZOS)
+        img_arr = np.array(img).astype(np.float32)
+
+        # Extract the center column (simulate a single-lead signal)
+        center_col = img_arr[:, img_arr.shape[1] // 2]
+
+        # Normalize to [0,1]
+        if center_col.max() != center_col.min():
+            ecg_signal = (center_col - center_col.min()) / (center_col.max() - center_col.min())
+        else:
+            ecg_signal = center_col / 255.0
+
+        # Reshape to (1, 187, 1)
         return ecg_signal.reshape(1, 187, 1)
     except Exception as e:
-        st.error(f"Image processing failed: {str(e)}")
+        st.error(f"Image preprocessing failed: {e}")
         st.stop()
 
 # 5) Precise ST-segment analysis
@@ -126,17 +133,17 @@ def validate_parameters(report):
 
     return warnings
 
-# 8) Main processing (sigmoid outputs)
+# 8) Main processing (softmax-based)
 def process_ecg_image(image_path):
     try:
         processed_data = preprocess_ecg_image(image_path)
-        raw_preds = model.predict(processed_data, verbose=0)[0]  # e.g. [0.02, 0.01, 0.97, 0.01, 0.03]
+        raw_preds = model.predict(processed_data, verbose=0)[0]  # softmax outputs sum to 1
 
-        # Each output is a sigmoid probability ∈ [0,1]; convert to %:
-        confidences = raw_preds * 100.0  # e.g. [2.0, 1.0, 97.0, 1.0, 3.0]
-        label_index = np.argmax(raw_preds)
+        # Convert to percentages
+        confidences = raw_preds * 100.0
+        label_index = int(np.argmax(raw_preds))
         label = _CLASS_LABELS.get(label_index, "Unknown")
-        top_confidence = confidences[label_index]
+        top_confidence = float(confidences[label_index])
 
         # Generate physiological parameters
         heart_rate = np.random.randint(60, 100)
@@ -168,8 +175,8 @@ def process_ecg_image(image_path):
             "ST Segment": st_seg,
             "Diagnosis": label,
             "MI Type": mi_type,
-            "Confidence": float(top_confidence),     # top sigmoid * 100
-            "All Confidences": confidences.tolist(),  # list of five percentages
+            "Confidence": top_confidence,      # softmax top percentage
+            "All Confidences": confidences.tolist(),
             "Validation Warnings": [],
             "Affected Leads": st_analysis["leads_affected"],
             "Lead II Detail": {
@@ -398,12 +405,12 @@ def main():
         for note in report["Validation Warnings"]:
             st.write(f"- {note}")
 
-    # V. Sigmoid-based Confidence Bar Chart (all classes)
+    # V. Softmax-based Confidence Bar Chart (all classes)
     st.subheader("V. Class-wise Confidence Scores (0–100%)")
     all_confidences = report["All Confidences"]
     fig, ax = plt.subplots()
     bar_colors = [
-        "green" if idx == np.argmax(report["All Confidences"]) else "blue"
+        "green" if idx == np.argmax(all_confidences) else "blue"
         for idx in range(len(_CLASS_LABELS))
     ]
     bars = ax.bar(list(_CLASS_LABELS.values()), all_confidences, color=bar_colors)
