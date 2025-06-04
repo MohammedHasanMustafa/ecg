@@ -22,7 +22,7 @@ st.set_page_config(
 @st.cache_resource
 def load_ecg_model():
     try:
-        model = load_model("ecg-classification-cnn-lstm-acc-98.h5")  # Updated model name
+        model = load_model("cnn-lstm-model.h5")  # Updated model name
         # Verify model architecture and weights
         if not hasattr(model, 'predict'):
             raise ValueError("Loaded object is not a valid Keras model")
