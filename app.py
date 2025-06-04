@@ -63,44 +63,42 @@ _LEADS_ALL = list(_LEAD_ANALYSIS.keys())
 # 4) Enhanced ECG image preprocessing
 def preprocess_ecg_image(image_path):
     try:
-        # Load with higher resolution and maintain aspect ratio
+        # Load image with PIL
         img = Image.open(image_path)
-        img = img.convert('L')  # Convert to grayscale
-        img = img.resize((512, 512), Image.LANCZOS)  # Higher resolution
         
-        # Convert to numpy array and normalize
+        # Convert to grayscale if needed
+        if img.mode != 'L':
+            img = img.convert('L')
+        
+        # Resize maintaining aspect ratio
+        target_size = (512, 512)
+        img = img.resize(target_size, Image.LANCZOS)
+        
+        # Convert to numpy array
         img_arr = np.array(img) / 255.0
         
-        # Extract signal with vertical projection
-        ecg_signal = img_arr.mean(axis=1).squeeze()
+        # Vertical projection to get 1D signal
+        ecg_signal = img_arr.mean(axis=1)
         
-        # Adaptive resampling based on signal characteristics
-        if len(ecg_signal) < 187:
-            ecg_signal = np.interp(
-                np.linspace(0, 1, 187),
-                np.linspace(0, 1, len(ecg_signal)),
-                ecg_signal
-            )
-        else:
-            # Find important features and resample accordingly
-            peaks = np.where(ecg_signal > 0.7)[0]
-            if len(peaks) > 0:
-                # Preserve QRS complexes during resampling
-                keep_indices = np.sort(np.concatenate([
-                    peaks,
-                    np.linspace(0, len(ecg_signal)-1, 187-len(peaks), dtype=int)
-                ]))
-                ecg_signal = ecg_signal[keep_indices]
-            else:
-                ecg_signal = np.interp(
-                    np.linspace(0, 1, 187),
-                    np.linspace(0, 1, len(ecg_signal)),
-                    ecg_signal
-                )
+        # Ensure we have a valid signal length
+        if len(ecg_signal) < 10:
+            raise ValueError("ECG signal too short after processing")
+        
+        # Safe resampling to 187 points
+        original_length = len(ecg_signal)
+        x_original = np.linspace(0, 1, original_length)
+        x_new = np.linspace(0, 1, 187)
+        
+        # Use cubic interpolation for better quality
+        ecg_signal = np.interp(x_new, x_original, ecg_signal)
+        
+        # Normalize signal
+        ecg_signal = (ecg_signal - np.min(ecg_signal)) / (np.max(ecg_signal) - np.min(ecg_signal))
         
         return ecg_signal.reshape(1, 187, 1)
+    
     except Exception as e:
-        st.error(f"Image processing failed: {str(e)}")
+        st.error(f"Image processing error: {str(e)}")
         st.stop()
 
 # 5) Precise ST-segment analysis
